@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import requests
 from bs4 import BeautifulSoup
@@ -145,3 +145,34 @@ def get_market_price(crop: str) -> Dict:
         "mustard": {"market": "Jaipur", "crop": "Mustard", "price_inr_per_quintal": 5400},
     }
     return fallback.get(crop.lower(), {"market": "Jaipur", "crop": crop, "price_inr_per_quintal": None})
+
+
+def get_pest_advice(crop: str) -> List[Dict]:
+    """Return all pest advisory rows for the given crop from pest_info table.
+
+    Args:
+        crop: Crop name (e.g., "Wheat", "Mustard"). Case-insensitive exact match on affected_crop.
+
+    Returns:
+        List of dictionaries with keys: pest_name, affected_crop, symptoms, management_advice.
+    """
+    connection = _connect_db()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT pest_name, affected_crop, symptoms, management_advice
+            FROM pest_info
+            WHERE LOWER(affected_crop) = LOWER(?)
+            ORDER BY pest_name ASC
+            """,
+            (crop,),
+        )
+        rows = cursor.fetchall()
+        keys = ["pest_name", "affected_crop", "symptoms", "management_advice"]
+        return [dict(zip(keys, row)) for row in rows]
+    except sqlite3.OperationalError:
+        # Table may not exist if ETL hasn't been run yet
+        return []
+    finally:
+        connection.close()
