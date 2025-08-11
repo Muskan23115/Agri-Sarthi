@@ -79,3 +79,4 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/webhook" -Method Post -Form @{
 - Whisper auto-downloads models on first use. For faster transcribe, consider `small` or `base`.
 - If `ctransformers` model is not available, a Hindi fallback reply is returned.
 - This MVP focuses on Jaipur and Wheat/Mustard only.
+
