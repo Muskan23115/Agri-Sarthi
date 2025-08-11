@@ -48,7 +48,6 @@ def ensure_database_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
-    # Define explicit schema for pest_info as requested
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pest_info (
@@ -56,6 +55,17 @@ def ensure_database_schema(connection: sqlite3.Connection) -> None:
             affected_crop TEXT,
             symptoms TEXT,
             management_advice TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS govt_schemes (
+            scheme_name TEXT,
+            purpose TEXT,
+            eligibility TEXT,
+            benefits TEXT,
+            how_to_apply TEXT
         )
         """
     )
@@ -69,7 +79,6 @@ def create_and_populate_pest_info(connection: sqlite3.Connection) -> int:
     """
     ensure_database_schema(connection)
     cursor = connection.cursor()
-    # Clear existing rows for idempotent ETL
     cursor.execute("DELETE FROM pest_info")
 
     seed_rows = [
@@ -98,6 +107,43 @@ def create_and_populate_pest_info(connection: sqlite3.Connection) -> int:
     return cursor.rowcount or 0
 
 
+def create_and_populate_govt_schemes(connection: sqlite3.Connection) -> int:
+    """Create the govt_schemes table (if needed) and populate with initial seed data.
+
+    Returns the number of rows inserted.
+    """
+    ensure_database_schema(connection)
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM govt_schemes")
+
+    seed_rows = [
+        {
+            "scheme_name": "Pradhan Mantri Fasal Bima Yojana (PMFBY)",
+            "purpose": "Crop insurance against yield losses. फसल हानि के खिलाफ बीमा।",
+            "eligibility": "All farmers, including sharecroppers and tenant farmers, growing notified crops in notified areas.",
+            "benefits": "Provides insurance coverage and financial support in the event of crop failure due to natural calamities, pests, or diseases.",
+            "how_to_apply": "Contact your nearest bank, Primary Agricultural Credit Society (PACS), or a Common Service Center (CSC). अपने नज़दीकी बैंक, PACS, या CSC केंद्र से संपर्क करें।",
+        },
+        {
+            "scheme_name": "Kisan Credit Card (KCC)",
+            "purpose": "Provides affordable credit for farmers. किसानों को सस्ती दर पर कर्ज़।",
+            "eligibility": "All farmers, individuals/joint borrowers who are owner cultivators.",
+            "benefits": "Short-term credit for cultivation, post-harvest expenses, and other farm needs. Low interest rates, with subsidies available.",
+            "how_to_apply": "Apply at any commercial bank, regional rural bank, or cooperative bank. किसी भी कमर्शियल बैंक, ग्रामीण बैंक, या सहकारी बैंक में आवेदन करें।",
+        },
+    ]
+
+    cursor.executemany(
+        """
+        INSERT INTO govt_schemes (scheme_name, purpose, eligibility, benefits, how_to_apply)
+        VALUES (:scheme_name, :purpose, :eligibility, :benefits, :how_to_apply)
+        """,
+        seed_rows,
+    )
+    connection.commit()
+    return cursor.rowcount or 0
+
+
 def try_scrape_wheat_mustard_info() -> pd.DataFrame:
     """
     Attempt to scrape public sources for Wheat and Mustard basic info in Jaipur.
@@ -106,10 +152,7 @@ def try_scrape_wheat_mustard_info() -> pd.DataFrame:
     """
     rows = []
 
-    # Attempt 1: Example ICAR/KVK-like pages (structure may vary). We'll try to parse
-    # for content blocks and keywords. If requests fail or structure unknown, we'll fallback.
     sources = [
-        # These URLs are examples and may change or be unavailable; we handle failures gracefully.
         "https://icar.org.in/",
         "https://kvk.icar.gov.in/",
         "https://www.agriculture.rajasthan.gov.in/",
@@ -122,14 +165,11 @@ def try_scrape_wheat_mustard_info() -> pd.DataFrame:
                 continue
             soup = BeautifulSoup(resp.text, "html.parser")
             text = soup.get_text(separator=" ", strip=True)
-            # Very rough heuristic: not reliable, so we don't rely on it to populate structured data.
             if any(k in text.lower() for k in ["wheat", "mustard", "गेहूं", "सरसों"]):
-                # We purposely do not parse due to instability; scraping here is placeholder.
                 pass
         except Exception:
             continue
 
-    # Fallback: curated minimal facts suitable for Jaipur, Rajasthan demo
     rows.extend([
         {
             "crop": "Wheat",
@@ -157,17 +197,7 @@ def try_scrape_wheat_mustard_info() -> pd.DataFrame:
 
 
 def try_scrape_soil_data_jaipur() -> pd.DataFrame:
-    """
-    Attempt to scrape soil characteristics for Jaipur. If not available, return fallback ranges.
-    """
-    # Attempt example source (structure may vary); we are resilient and fallback to curated values.
-    try:
-        # Placeholder attempt: often soil maps are PDFs/geoportals; skip hard scraping here
-        pass
-    except Exception:
-        pass
-
-    fallback = [
+    rows = [
         {
             "location": "Jaipur, Rajasthan",
             "soil_type": "Sandy loam to loam",
@@ -178,7 +208,7 @@ def try_scrape_soil_data_jaipur() -> pd.DataFrame:
             "k_status": "Medium",
         }
     ]
-    return pd.DataFrame(fallback)
+    return pd.DataFrame(rows)
 
 
 def load_to_sqlite(crop_df: pd.DataFrame, soil_df: pd.DataFrame, db_path: str = DB_PATH) -> None:
@@ -203,10 +233,10 @@ def run_etl() -> Tuple[int, int]:
 
     load_to_sqlite(crop_df, soil_df, DB_PATH)
 
-    # Create and populate pest_info as part of ETL
     conn = sqlite3.connect(DB_PATH)
     try:
-        inserted = create_and_populate_pest_info(conn)
+        create_and_populate_pest_info(conn)
+        create_and_populate_govt_schemes(conn)
     finally:
         conn.close()
 
