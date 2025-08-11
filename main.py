@@ -1,22 +1,13 @@
-import base64
 import io
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import httpx
 import orjson
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, UploadFile
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
-from agents import (
-    get_crop_advice,
-    get_weather,
-    get_market_price,
-    get_pest_advice,
-    get_scheme_info,
-)
 
 # Load .env if present
 try:
@@ -36,12 +27,24 @@ try:
 except Exception:  # pragma: no cover
     AutoModelForCausalLM = None  # type: ignore
 
-WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")  # e.g., local gateway or self-hosted stack
+# RAG stack
+try:
+    import chromadb  # type: ignore
+    from sentence_transformers import SentenceTransformer  # type: ignore
+except Exception:
+    chromadb = None  # type: ignore
+    SentenceTransformer = None  # type: ignore
+
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN")
 WHATSAPP_SENDER_ID = os.getenv("WHATSAPP_SENDER_ID")
 LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH", "models/mistral-7b-instruct.Q4_K_M.gguf")
 
-app = FastAPI(title="Agri-Sarthi MVP")
+CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma_db")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_sarthi_knowledge")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+app = FastAPI(title="Agri-Sarthi MVP (RAG)")
 
 
 class WebhookText(BaseModel):
@@ -50,19 +53,51 @@ class WebhookText(BaseModel):
     location: Optional[str] = "Jaipur, Rajasthan"
 
 
+def load_llm():
+    if AutoModelForCausalLM is None:
+        return None
+    try:
+        llm = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL_PATH,
+            model_type="mistral",
+            gpu_layers=0,
+            context_length=2048,
+            threads=int(os.getenv("LLM_THREADS", "4")),
+        )
+        return llm
+    except Exception:
+        return None
+
+
+def load_rag_components():
+    if chromadb is None or SentenceTransformer is None:
+        return None, None, None
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        collection = client.get_collection(COLLECTION_NAME)
+    except Exception:
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        # Collection missing; will signal to user via error later
+        collection = None
+    try:
+        embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    except Exception:
+        embedder = None
+    return client, collection, embedder
+
+
+LLM = load_llm()
+CHROMA_CLIENT, CHROMA_COLLECTION, EMBEDDER = load_rag_components()
+
+
 async def transcribe_audio(file_bytes: bytes) -> str:
     if whisper is None:
         return ""
     try:
-        # Use small model for MVP speed; will auto-download on first use
         model = whisper.load_model("small")
-        with io.BytesIO(file_bytes) as f:
-            audio = f.read()
-        # whisper expects file path or numpy array; using temporary buffer is okay via load_audio
-        # Simpler approach: write temp file
         tmp_path = "_tmp_audio.ogg"
         with open(tmp_path, "wb") as wf:
-            wf.write(audio)
+            wf.write(file_bytes)
         result = model.transcribe(tmp_path, language="hi")
         try:
             os.remove(tmp_path)
@@ -73,125 +108,40 @@ async def transcribe_audio(file_bytes: bytes) -> str:
         return ""
 
 
-def run_llm_hindi(context: str, user_query: str) -> str:
-    if AutoModelForCausalLM is None:
-        # Fallback template response
+def generate_response(user_query: str) -> str:
+    # Ensure RAG components are available
+    if CHROMA_COLLECTION is None or EMBEDDER is None:
         return (
-            "कृपया ध्यान दें: ऑफ़लाइन LLM उपलब्ध नहीं है। आपके प्रश्न का संक्षिप्त उत्तर: "
-            + user_query
-            + " | संदर्भ: "
-            + context[:400]
+            "Vector database not initialized. Please run: `python build_vector_db.py` "
+            "to build the Chroma collection before asking questions."
+        )
+
+    # Embed query and retrieve
+    try:
+        query_embedding = EMBEDDER.encode([user_query], convert_to_numpy=True)[0].tolist()
+        results = CHROMA_COLLECTION.query(query_embeddings=[query_embedding], n_results=3)
+        docs = results.get("documents", [[]])[0]
+    except Exception:
+        docs = []
+
+    retrieved_context = "\n\n".join(docs) if docs else "(No relevant context found.)"
+
+    prompt = (
+        "[INST] You are a helpful farm advisor. Answer the User Query based *only* on the Retrieved Context provided below. "
+        "If the context doesn't contain the answer, say you don't have enough information. "
+        f"User Query: {user_query}\n\nRetrieved Context:\n{retrieved_context}\n[/INST]"
+    )
+
+    if LLM is None:
+        return (
+            "LLM not available. Context summary: " + retrieved_context[:500]
         )
 
     try:
-        llm = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL_PATH,
-            model_type="mistral",
-            gpu_layers=0,
-            context_length=2048,
-            threads=int(os.getenv("LLM_THREADS", "4")),
-        )
-        prompt = (
-            "You are Agri-Sarthi, a helpful agricultural advisor for Jaipur farmers. "
-            "Respond in simple, natural Hindi. Keep it concise and factual.\n\n"
-            f"Context:\n{context}\n\n"
-            f"User question:\n{user_query}\n\n"
-            "उत्तर हिंदी में दें।"
-        )
-        output = llm(prompt, max_new_tokens=256, temperature=0.4, top_p=0.9)
+        output = LLM(prompt, max_new_tokens=256, temperature=0.3, top_p=0.9)
         return str(output).strip()
     except Exception:
-        return (
-            "कृपया ध्यान दें: LLM से उत्तर जनरेट नहीं हो सका। संक्षेप: "
-            + user_query
-        )
-
-
-def build_context(
-    crop: Optional[str],
-    location: str,
-    include_pest_advice: bool = False,
-    include_scheme_info: bool = False,
-) -> Dict:
-    data: Dict[str, Optional[Dict]] = {
-        "crop_info": None,
-        "weather": None,
-        "market_price": None,
-    }
-    if crop:
-        data["crop_info"] = get_crop_advice(crop, location)
-        data["market_price"] = get_market_price(crop)
-        if include_pest_advice:
-            # store as list of dicts
-            data["pest_advice"] = get_pest_advice(crop)
-    else:
-        if include_pest_advice:
-            data["pest_advice"] = []
-
-    if include_scheme_info:
-        data["scheme_info"] = get_scheme_info()
-
-    data["weather"] = get_weather(location)
-    return data
-
-
-def format_context_string(data: Dict, user_query: str, crop: Optional[str], location: str) -> str:
-    parts = [
-        f"User: {user_query}",
-        f"Location: {location}",
-    ]
-    if crop:
-        parts.append(f"Crop: {crop}")
-
-    ci = data.get("crop_info") or {}
-    if ci:
-        parts.append(
-            "Crop Info: "
-            + ", ".join(
-                f"{k}={v}" for k, v in ci.items() if v is not None and v != ""
-            )
-        )
-
-    wx = data.get("weather") or {}
-    if wx:
-        parts.append(
-            "Weather: "
-            + ", ".join(
-                f"{k}={v}" for k, v in wx.items() if v is not None and v != ""
-            )
-        )
-
-    mp = data.get("market_price") or {}
-    if mp:
-        parts.append(
-            "Market Price: "
-            + ", ".join(
-                f"{k}={v}" for k, v in mp.items() if v is not None and v != ""
-            )
-        )
-
-    pest_list = data.get("pest_advice") or []
-    if pest_list:
-        # Compact representation of pests
-        pest_strs = []
-        for p in pest_list:
-            n = p.get("pest_name")
-            s = p.get("symptoms")
-            m = p.get("management_advice")
-            pest_strs.append(f"{n}: symptoms={s}; management={m}")
-        parts.append("Pest Advice: " + " || ".join(pest_strs))
-
-    scheme_list = data.get("scheme_info") or []
-    if scheme_list:
-        sch_strs = []
-        for s in scheme_list[:5]:
-            name = s.get("scheme_name")
-            purpose = s.get("purpose")
-            benefits = s.get("benefits")
-            sch_strs.append(f"{name}: purpose={purpose}; benefits={benefits}")
-        parts.append("Schemes: " + " || ".join(sch_strs))
-
-    return " | ".join(parts)
+        return "Unable to generate response at the moment. Please try again later."
 
 
 async def send_whatsapp_text(to_number: str, text: str) -> None:
@@ -210,36 +160,8 @@ async def send_whatsapp_text(to_number: str, text: str) -> None:
         pass
 
 
-PEST_KEYWORDS = ["pest", "disease", "कीड़ा", "रोग", "बीमारी"]
-SCHEME_KEYWORDS = [
-    "scheme",
-    "yojana",
-    "sarkari",
-    "subsidy",
-    "loan",
-    "bima",
-    "बीमा",
-    "योजना",
-    "सब्सिडी",
-    "लोन",
-]
-
-
 @app.post("/webhook")
 async def webhook(request: Request):
-    """
-    WhatsApp webhook. Accepts JSON for text messages and multipart for audio.
-
-    - For text JSON:
-      {
-        "from_number": "+91...",
-        "message": "सरसों के लिए सिंचाई?",
-        "location": "Jaipur, Rajasthan" (optional)
-      }
-
-    - For audio multipart:
-      fields: from_number, location (optional), and file under key 'audio'
-    """
     content_type = request.headers.get("content-type", "")
 
     if content_type.startswith("application/json"):
@@ -247,34 +169,15 @@ async def webhook(request: Request):
         data = orjson.loads(body)
         payload = WebhookText(**data)
         user_query = payload.message.strip()
-        location = payload.location or "Jaipur, Rajasthan"
         from_number = payload.from_number
-        # Keyword-based orchestrator
-        uq_lower = user_query.lower()
-        crop = None
-        if any(k in uq_lower for k in ["wheat", "गेहूं", "gehun", "gehu"]):
-            crop = "Wheat"
-        elif any(k in uq_lower for k in ["mustard", "सरसों", "sarson"]):
-            crop = "Mustard"
 
-        include_pests = any(k in uq_lower for k in PEST_KEYWORDS)
-        include_schemes = any(k in uq_lower for k in SCHEME_KEYWORDS)
-
-        data = build_context(
-            crop,
-            location,
-            include_pest_advice=include_pests,
-            include_scheme_info=include_schemes,
-        )
-        ctx = format_context_string(data, user_query, crop, location)
-        answer = run_llm_hindi(ctx, user_query)
+        answer = generate_response(user_query)
         await send_whatsapp_text(from_number, answer)
         return JSONResponse({"ok": True, "answer": answer})
 
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         from_number = str(form.get("from_number", ""))
-        location = str(form.get("location", "Jaipur, Rajasthan"))
         file: UploadFile = form.get("audio")  # type: ignore
         transcript = ""
         if file is not None:
@@ -282,24 +185,7 @@ async def webhook(request: Request):
             transcript = await transcribe_audio(audio_bytes)
         user_query = transcript or ""
 
-        uq_lower = user_query.lower()
-        crop = None
-        if any(k in uq_lower for k in ["wheat", "गेहूं", "gehun", "gehu"]):
-            crop = "Wheat"
-        elif any(k in uq_lower for k in ["mustard", "सरसों", "sarson"]):
-            crop = "Mustard"
-
-        include_pests = any(k in uq_lower for k in PEST_KEYWORDS)
-        include_schemes = any(k in uq_lower for k in SCHEME_KEYWORDS)
-
-        data = build_context(
-            crop,
-            location,
-            include_pest_advice=include_pests,
-            include_scheme_info=include_schemes,
-        )
-        ctx = format_context_string(data, user_query, crop, location)
-        answer = run_llm_hindi(ctx, user_query)
+        answer = generate_response(user_query)
         await send_whatsapp_text(from_number, answer)
         return JSONResponse({"ok": True, "answer": answer, "transcript": transcript})
 
