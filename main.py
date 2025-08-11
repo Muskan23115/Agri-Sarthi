@@ -38,7 +38,11 @@ except Exception:
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN")
 WHATSAPP_SENDER_ID = os.getenv("WHATSAPP_SENDER_ID")
-LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH", "models/mistral-7b-instruct.Q4_K_M.gguf")
+
+# --- Using the faster TinyLlama model ---
+MODEL_FILENAME = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+LLM_MODEL_PATH = os.path.abspath(os.path.join("models", MODEL_FILENAME))
+
 
 CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "agri_sarthi_knowledge")
@@ -54,18 +58,28 @@ class WebhookText(BaseModel):
 
 
 def load_llm():
+    """Loads the LLM with detailed error logging."""
     if AutoModelForCausalLM is None:
+        print("Warning: ctransformers library not found.")
         return None
+    
+    if not os.path.exists(LLM_MODEL_PATH):
+        print(f"CRITICAL ERROR: Model file not found at path: {LLM_MODEL_PATH}")
+        return None
+
     try:
+        print(f"Attempting to load LLM from absolute path: {LLM_MODEL_PATH}")
         llm = AutoModelForCausalLM.from_pretrained(
             LLM_MODEL_PATH,
-            model_type="mistral",
+            model_type="llama",
             gpu_layers=0,
             context_length=2048,
             threads=int(os.getenv("LLM_THREADS", "4")),
         )
+        print("LLM loaded successfully.")
         return llm
-    except Exception:
+    except Exception as e:
+        print(f"CRITICAL ERROR: LLM failed to load. Details: {e}")
         return None
 
 
@@ -77,7 +91,6 @@ def load_rag_components():
         collection = client.get_collection(COLLECTION_NAME)
     except Exception:
         client = chromadb.PersistentClient(path=CHROMA_PATH)
-        # Collection missing; will signal to user via error later
         collection = None
     try:
         embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -109,38 +122,52 @@ async def transcribe_audio(file_bytes: bytes) -> str:
 
 
 def generate_response(user_query: str) -> str:
-    # Ensure RAG components are available
     if CHROMA_COLLECTION is None or EMBEDDER is None:
         return (
             "Vector database not initialized. Please run: `python build_vector_db.py` "
             "to build the Chroma collection before asking questions."
         )
 
-    # Embed query and retrieve
     try:
         query_embedding = EMBEDDER.encode([user_query], convert_to_numpy=True)[0].tolist()
         results = CHROMA_COLLECTION.query(query_embeddings=[query_embedding], n_results=3)
         docs = results.get("documents", [[]])[0]
-    except Exception:
+    except Exception as e:
         docs = []
 
     retrieved_context = "\n\n".join(docs) if docs else "(No relevant context found.)"
 
-    prompt = (
-        "[INST] You are a helpful farm advisor. Answer the User Query based *only* on the Retrieved Context provided below. "
-        "If the context doesn't contain the answer, say you don't have enough information. "
-        f"User Query: {user_query}\n\nRetrieved Context:\n{retrieved_context}\n[/INST]"
-    )
+    # --- FINAL ATTEMPT: Simplest possible prompt format ---
+    prompt = f"""Instruction: You are a helpful farm advisor. Answer the user's query in simple Hindi based only on the provided context.
+
+Context:
+{retrieved_context}
+
+User Query:
+{user_query}
+
+Answer (in Hindi):
+"""
 
     if LLM is None:
         return (
-            "LLM not available. Context summary: " + retrieved_context[:500]
+            "LLM not available. Please check server logs for errors."
         )
 
     try:
-        output = LLM(prompt, max_new_tokens=256, temperature=0.3, top_p=0.9)
+        print("\n--- PROMPT SENT TO LLM ---")
+        print(prompt)
+        print("--- END OF PROMPT ---\n")
+        
+        output = LLM(prompt, max_new_tokens=256, temperature=0.7, top_p=0.9)
+
+        print("\n--- RAW OUTPUT FROM LLM ---")
+        print(repr(output))
+        print("--- END OF RAW OUTPUT ---\n")
+
         return str(output).strip()
-    except Exception:
+    except Exception as e:
+        print(f"Error during LLM generation: {e}")
         return "Unable to generate response at the moment. Please try again later."
 
 
@@ -172,7 +199,6 @@ async def webhook(request: Request):
         from_number = payload.from_number
 
         answer = generate_response(user_query)
-        await send_whatsapp_text(from_number, answer)
         return JSONResponse({"ok": True, "answer": answer})
 
     if content_type.startswith("multipart/form-data"):
@@ -186,7 +212,6 @@ async def webhook(request: Request):
         user_query = transcript or ""
 
         answer = generate_response(user_query)
-        await send_whatsapp_text(from_number, answer)
         return JSONResponse({"ok": True, "answer": answer, "transcript": transcript})
 
     return JSONResponse({"ok": False, "error": "Unsupported content-type"}, status_code=400)

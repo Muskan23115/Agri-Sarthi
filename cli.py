@@ -1,103 +1,114 @@
-import argparse
-import json
+import io
 import os
-import sys
 from typing import Optional
 
-import requests
+import httpx
+import orjson
+import typer
+from rich import print_json
 
-WEBHOOK_URL_DEFAULT = os.getenv("WEBHOOK_URL", "http://127.0.0.1:8000/webhook")
+# Load .env if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
+# Default webhook URL from environment or fallback
+DEFAULT_WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://127.0.0.1:8000/webhook")
+
+app = typer.Typer(
+    help="Agri-Sarthi CLI for testing the API, running ETL, etc.",
+    pretty_exceptions_show_locals=False,
+)
 
 
-def cmd_etl(_: argparse.Namespace) -> int:
-    # Run ETL by invoking etl.run_etl
+@app.command(help="Run the ETL process to build the main SQLite DB.")
+def etl():
+    """Runs the main ETL to build or rebuild the SQLite database."""
     try:
-        from etl import run_etl, DB_PATH  # type: ignore
-    except Exception as exc:  # pragma: no cover
-        print(f"Failed to import ETL: {exc}")
-        return 1
+        from etl import run_etl  # type: ignore
+
+        print("Running main ETL process...")
+        run_etl()
+        print("✅ ETL process completed successfully.")
+    except Exception as e:
+        print(f"❌ ETL process failed: {e}")
+
+
+@app.command(help="Run the Vector DB build process.")
+def build_db():
+    """Builds the ChromaDB vector store from the SQLite DB."""
     try:
-        n_crops, n_soils = run_etl()
-        print(f"Loaded {n_crops} crop rows and {n_soils} soil rows into {DB_PATH}")
-        return 0
-    except Exception as exc:
-        print(f"ETL failed: {exc}")
-        return 1
+        from build_vector_db import run_vector_db_build  # type: ignore
+
+        print("Building vector database...")
+        run_vector_db_build()
+        print("✅ Vector database build completed successfully.")
+    except Exception as e:
+        print(f"❌ Vector DB build failed: {e}")
 
 
-def cmd_text(args: argparse.Namespace) -> int:
+@app.command(help="Send a test text message to the webhook.")
+def text(
+    message: str = typer.Option(..., "--message", "-m", help="Message text to send"),
+    from_number: str = typer.Option(
+        "+919999999999", "--from-number", "-f", help="Simulated sender phone number"
+    ),
+    location: str = typer.Option(
+        "Jaipur, Rajasthan", "--location", "-l", help="Simulated location"
+    ),
+    url: str = typer.Option(
+        DEFAULT_WEBHOOK_URL, "--url", "-u", help="Webhook URL to send the request to"
+    ),
+):
+    """Sends a text query to the webhook."""
     payload = {
-        "from_number": args.from_number,
-        "message": args.message,
-        "location": args.location or "Jaipur, Rajasthan",
+        "from_number": from_number,
+        "message": message,
+        "location": location,
     }
     try:
-        r = requests.post(args.url, json=payload, timeout=20)
-        print(f"Status: {r.status_code}")
-        try:
-            print(json.dumps(r.json(), ensure_ascii=False, indent=2))
-        except Exception:
-            print(r.text)
-        return 0 if r.ok else 1
-    except Exception as exc:
-        print(f"Request failed: {exc}")
-        return 1
+        # --- INCREASED TIMEOUT TO 5 MINUTES ---
+        # This gives the local LLM plenty of time to process the first request.
+        with httpx.Client(timeout=300.0) as client:
+            response = client.post(url, json=payload)
+        print(f"Status: {response.status_code}")
+        print_json(data=response.json())
+    except httpx.RequestError as e:
+        print(f"Request failed: {e}")
 
 
-def cmd_audio(args: argparse.Namespace) -> int:
-    if not os.path.isfile(args.file):
-        print(f"File not found: {args.file}")
-        return 1
-    files = {
-        "audio": (os.path.basename(args.file), open(args.file, "rb"), "application/octet-stream"),
-    }
-    data = {
-        "from_number": args.from_number,
-        "location": args.location or "Jaipur, Rajasthan",
-    }
+@app.command(help="Send a test audio file to the webhook.")
+def audio(
+    file: str = typer.Option(..., "--file", "-F", help="Path to the audio file"),
+    from_number: str = typer.Option(
+        "+919999999999", "--from-number", "-f", help="Simulated sender phone number"
+    ),
+    location: Optional[str] = typer.Option(
+        "Jaipur, Rajasthan", "--location", "-l", help="Simulated location"
+    ),
+    url: str = typer.Option(
+        DEFAULT_WEBHOOK_URL, "--url", "-u", help="Webhook URL to send the request to"
+    ),
+):
+    """Sends an audio file query to the webhook."""
+    if not os.path.exists(file):
+        print(f"File not found: {file}")
+        raise typer.Exit(1)
+
+    files = {"audio": (os.path.basename(file), open(file, "rb"))}
+    data = {"from_number": from_number, "location": location}
+
     try:
-        r = requests.post(args.url, files=files, data=data, timeout=60)
-        print(f"Status: {r.status_code}")
-        try:
-            print(json.dumps(r.json(), ensure_ascii=False, indent=2))
-        except Exception:
-            print(r.text)
-        return 0 if r.ok else 1
-    except Exception as exc:
-        print(f"Request failed: {exc}")
-        return 1
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Agri-Sarthi CLI")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    p_etl = sub.add_parser("etl", help="Run ETL to build the SQLite knowledge DB")
-    p_etl.set_defaults(func=cmd_etl)
-
-    p_text = sub.add_parser("text", help="Send a text message to the webhook")
-    p_text.add_argument("--message", required=True, help="User message in Hindi or English")
-    p_text.add_argument("--from-number", default="+910000000000", help="WhatsApp sender number")
-    p_text.add_argument("--location", default="Jaipur, Rajasthan", help="User location")
-    p_text.add_argument("--url", default=WEBHOOK_URL_DEFAULT, help="Webhook URL")
-    p_text.set_defaults(func=cmd_text)
-
-    p_audio = sub.add_parser("audio", help="Send an audio file to the webhook")
-    p_audio.add_argument("--file", required=True, help="Path to audio file (e.g., OGG/MP3)")
-    p_audio.add_argument("--from-number", default="+910000000000", help="WhatsApp sender number")
-    p_audio.add_argument("--location", default="Jaipur, Rajasthan", help="User location")
-    p_audio.add_argument("--url", default=WEBHOOK_URL_DEFAULT, help="Webhook URL")
-    p_audio.set_defaults(func=cmd_audio)
-
-    return p
-
-
-def main(argv: Optional[list] = None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return int(args.func(args))
+        # --- INCREASED TIMEOUT TO 5 MINUTES ---
+        with httpx.Client(timeout=300.0) as client:
+            response = client.post(url, files=files, data=data)
+        print(f"Status: {response.status_code}")
+        print_json(data=response.json())
+    except httpx.RequestError as e:
+        print(f"Request failed: {e}")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    app()

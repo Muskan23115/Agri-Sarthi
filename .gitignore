@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment
+.env
+
+# Databases
+*.db
+*.sqlite3
+chroma_db/
+
+# AI Models
+models/
+
+# IDE / Editor
+.vscode/
