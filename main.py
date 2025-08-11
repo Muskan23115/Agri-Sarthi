@@ -10,7 +10,13 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from agents import get_crop_advice, get_weather, get_market_price, get_pest_advice
+from agents import (
+    get_crop_advice,
+    get_weather,
+    get_market_price,
+    get_pest_advice,
+    get_scheme_info,
+)
 
 # Load .env if present
 try:
@@ -101,7 +107,12 @@ def run_llm_hindi(context: str, user_query: str) -> str:
         )
 
 
-def build_context(crop: Optional[str], location: str, include_pest_advice: bool = False) -> Dict:
+def build_context(
+    crop: Optional[str],
+    location: str,
+    include_pest_advice: bool = False,
+    include_scheme_info: bool = False,
+) -> Dict:
     data: Dict[str, Optional[Dict]] = {
         "crop_info": None,
         "weather": None,
@@ -116,6 +127,10 @@ def build_context(crop: Optional[str], location: str, include_pest_advice: bool 
     else:
         if include_pest_advice:
             data["pest_advice"] = []
+
+    if include_scheme_info:
+        data["scheme_info"] = get_scheme_info()
+
     data["weather"] = get_weather(location)
     return data
 
@@ -166,6 +181,16 @@ def format_context_string(data: Dict, user_query: str, crop: Optional[str], loca
             pest_strs.append(f"{n}: symptoms={s}; management={m}")
         parts.append("Pest Advice: " + " || ".join(pest_strs))
 
+    scheme_list = data.get("scheme_info") or []
+    if scheme_list:
+        sch_strs = []
+        for s in scheme_list[:5]:
+            name = s.get("scheme_name")
+            purpose = s.get("purpose")
+            benefits = s.get("benefits")
+            sch_strs.append(f"{name}: purpose={purpose}; benefits={benefits}")
+        parts.append("Schemes: " + " || ".join(sch_strs))
+
     return " | ".join(parts)
 
 
@@ -186,6 +211,18 @@ async def send_whatsapp_text(to_number: str, text: str) -> None:
 
 
 PEST_KEYWORDS = ["pest", "disease", "कीड़ा", "रोग", "बीमारी"]
+SCHEME_KEYWORDS = [
+    "scheme",
+    "yojana",
+    "sarkari",
+    "subsidy",
+    "loan",
+    "bima",
+    "बीमा",
+    "योजना",
+    "सब्सिडी",
+    "लोन",
+]
 
 
 @app.post("/webhook")
@@ -213,16 +250,22 @@ async def webhook(request: Request):
         location = payload.location or "Jaipur, Rajasthan"
         from_number = payload.from_number
         # Keyword-based orchestrator
-        crop = None
         uq_lower = user_query.lower()
+        crop = None
         if any(k in uq_lower for k in ["wheat", "गेहूं", "gehun", "gehu"]):
             crop = "Wheat"
         elif any(k in uq_lower for k in ["mustard", "सरसों", "sarson"]):
             crop = "Mustard"
 
         include_pests = any(k in uq_lower for k in PEST_KEYWORDS)
+        include_schemes = any(k in uq_lower for k in SCHEME_KEYWORDS)
 
-        data = build_context(crop, location, include_pest_advice=include_pests)
+        data = build_context(
+            crop,
+            location,
+            include_pest_advice=include_pests,
+            include_scheme_info=include_schemes,
+        )
         ctx = format_context_string(data, user_query, crop, location)
         answer = run_llm_hindi(ctx, user_query)
         await send_whatsapp_text(from_number, answer)
@@ -247,8 +290,14 @@ async def webhook(request: Request):
             crop = "Mustard"
 
         include_pests = any(k in uq_lower for k in PEST_KEYWORDS)
+        include_schemes = any(k in uq_lower for k in SCHEME_KEYWORDS)
 
-        data = build_context(crop, location, include_pest_advice=include_pests)
+        data = build_context(
+            crop,
+            location,
+            include_pest_advice=include_pests,
+            include_scheme_info=include_schemes,
+        )
         ctx = format_context_string(data, user_query, crop, location)
         answer = run_llm_hindi(ctx, user_query)
         await send_whatsapp_text(from_number, answer)
