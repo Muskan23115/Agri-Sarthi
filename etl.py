@@ -48,7 +48,54 @@ def ensure_database_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    # Define explicit schema for pest_info as requested
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pest_info (
+            pest_name TEXT,
+            affected_crop TEXT,
+            symptoms TEXT,
+            management_advice TEXT
+        )
+        """
+    )
     connection.commit()
+
+
+def create_and_populate_pest_info(connection: sqlite3.Connection) -> int:
+    """Create the pest_info table (if needed) and populate with initial seed data.
+
+    Returns the number of rows inserted.
+    """
+    ensure_database_schema(connection)
+    cursor = connection.cursor()
+    # Clear existing rows for idempotent ETL
+    cursor.execute("DELETE FROM pest_info")
+
+    seed_rows = [
+        {
+            "pest_name": "White Grub (सफ़ेद लट)",
+            "affected_crop": "Mustard",
+            "symptoms": "Roots eaten, plant wilting, sudden drying of plants. जड़ें खाई हुई, पौधा मुरझा रहा है, अचानक सूखना।",
+            "management_advice": "Apply Phorate 10G granules at 10 kg/ha before sowing. बुवाई से पहले फोरेट 10जी दाने 10 किग्रा/हेक्टेयर की दर से प्रयोग करें।",
+        },
+        {
+            "pest_name": "Aphids (माहू or चैंपा)",
+            "affected_crop": "Wheat",
+            "symptoms": "Yellowing of leaves, sticky honeydew secretion, black sooty mold. पत्तियों का पीला पड़ना, चिपचिपा स्राव, काला कवक।",
+            "management_advice": "Spray Imidacloprid 17.8% SL at 1 ml/litre of water. इमिडाक्लोप्रिड 17.8% एसएल का 1 मिली/लीटर पानी में घोलकर छिड़काव करें।",
+        },
+    ]
+
+    cursor.executemany(
+        """
+        INSERT INTO pest_info (pest_name, affected_crop, symptoms, management_advice)
+        VALUES (:pest_name, :affected_crop, :symptoms, :management_advice)
+        """,
+        seed_rows,
+    )
+    connection.commit()
+    return cursor.rowcount or 0
 
 
 def try_scrape_wheat_mustard_info() -> pd.DataFrame:
@@ -155,6 +202,14 @@ def run_etl() -> Tuple[int, int]:
         raise RuntimeError("No soil data collected")
 
     load_to_sqlite(crop_df, soil_df, DB_PATH)
+
+    # Create and populate pest_info as part of ETL
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        inserted = create_and_populate_pest_info(conn)
+    finally:
+        conn.close()
+
     return len(crop_df), len(soil_df)
 
 
