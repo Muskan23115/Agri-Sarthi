@@ -12,6 +12,13 @@ from pydantic import BaseModel
 
 from agents import get_crop_advice, get_weather, get_market_price
 
+# Load .env if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
 # Optional AI imports (load lazily)
 try:
     import whisper  # openai-whisper

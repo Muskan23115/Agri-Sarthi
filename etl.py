@@ -6,6 +6,13 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+# Load .env if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
 DB_PATH = os.getenv("DB_PATH", "knowledge.db")
 
 
