@@ -57,7 +57,6 @@ def get_weather(location: str) -> Dict:
 
     For MVP, we map 'Jaipur' to its lat/lon. No API key needed.
     """
-    # Jaipur coordinates
     lat, lon = 26.9124, 75.7873
 
     try:
@@ -97,21 +96,18 @@ def get_weather(location: str) -> Dict:
 
 def _parse_agmarknet_price(html: str, crop: str) -> Optional[Dict]:
     soup = BeautifulSoup(html, "lxml")
-    # MVP heuristic parsing; real portal often uses forms and JS. We'll parse any table present.
     tables = soup.find_all("table")
     for table in tables:
         headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
         if not headers:
             continue
         if any("variety" in h or "commodity" in h for h in headers):
-            # Try to find Jaipur rows
             for tr in table.find_all("tr"):
                 tds = [td.get_text(strip=True) for td in tr.find_all("td")]
                 if len(tds) < 3:
                     continue
                 row_text = " ".join(tds).lower()
                 if "jaipur" in row_text and crop.lower() in row_text:
-                    # Heuristic: find any price-like numeric
                     price = None
                     for cell in tds:
                         digits = "".join(ch for ch in cell if ch.isdigit())
@@ -123,8 +119,6 @@ def _parse_agmarknet_price(html: str, crop: str) -> Optional[Dict]:
 
 
 def get_market_price(crop: str) -> Dict:
-    """Scrape Agmarknet portal for Jaipur prices. Fallback to a seeded estimate.
-    """
     urls = [
         "https://agmarknet.gov.in/",
     ]
@@ -139,7 +133,6 @@ def get_market_price(crop: str) -> Dict:
         except Exception:
             continue
 
-    # Fallback seed values (illustrative ranges)
     fallback = {
         "wheat": {"market": "Jaipur", "crop": "Wheat", "price_inr_per_quintal": 2200},
         "mustard": {"market": "Jaipur", "crop": "Mustard", "price_inr_per_quintal": 5400},
@@ -148,14 +141,6 @@ def get_market_price(crop: str) -> Dict:
 
 
 def get_pest_advice(crop: str) -> List[Dict]:
-    """Return all pest advisory rows for the given crop from pest_info table.
-
-    Args:
-        crop: Crop name (e.g., "Wheat", "Mustard"). Case-insensitive exact match on affected_crop.
-
-    Returns:
-        List of dictionaries with keys: pest_name, affected_crop, symptoms, management_advice.
-    """
     connection = _connect_db()
     try:
         cursor = connection.cursor()
@@ -172,7 +157,27 @@ def get_pest_advice(crop: str) -> List[Dict]:
         keys = ["pest_name", "affected_crop", "symptoms", "management_advice"]
         return [dict(zip(keys, row)) for row in rows]
     except sqlite3.OperationalError:
-        # Table may not exist if ETL hasn't been run yet
+        return []
+    finally:
+        connection.close()
+
+
+def get_scheme_info() -> List[Dict]:
+    """Return all government schemes from govt_schemes table."""
+    connection = _connect_db()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT scheme_name, purpose, eligibility, benefits, how_to_apply
+            FROM govt_schemes
+            ORDER BY scheme_name ASC
+            """
+        )
+        rows = cursor.fetchall()
+        keys = ["scheme_name", "purpose", "eligibility", "benefits", "how_to_apply"]
+        return [dict(zip(keys, row)) for row in rows]
+    except sqlite3.OperationalError:
         return []
     finally:
         connection.close()
