@@ -43,7 +43,7 @@ Copy `.env.example` to `.env` and adjust if needed.
 - `WEBHOOK_URL` (CLI default webhook)
 
 ## Download a GGUF model
-Use an openly licensed Mistral 7B Instruct GGUF, e.g. `TheBloke/Mistral-7B-Instruct-GGUF` Q4_K_M. Place it at `models/mistral-7b-instruct.Q4_K_M.gguf` or set `LLM_MODEL_PATH`.
+Use an openly licensed Mistral 7B Instruct GGUF, e.g. `TheBloke/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` Q4_K_M. Place it at `models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` or set `LLM_MODEL_PATH`.
 
 ## CLI usage
 ```powershell
