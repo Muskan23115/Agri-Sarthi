@@ -8,7 +8,7 @@ WhatsApp-based agricultural advisory bot for Jaipur farmers (Wheat, Mustard). Fu
 - Static knowledge in SQLite (`knowledge.db`) via ETL
 - Weather from Open-Meteo (free)
 - Market price: Agmarknet scrape with fallback
-- Local LLM (Mistral 7B Instruct GGUF) via `ctransformers`
+- Local LLM (tinyllama Q4_K_M.gguf) via `ctransformers`
 
 ## Requirements
 - Python 3.10+
